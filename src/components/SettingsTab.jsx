@@ -12,6 +12,7 @@ const TOGGLES = [
   { key: "inventory", label: "📦 Inventory",         desc: "Track supplies, food, salt mix, chemicals" },
   { key: "journal",   label: "📝 Journal",           desc: "Daily free-form notes and observations" },
   { key: "livestock", label: "🐠 Livestock",         desc: "Individual fish, coral, and invert profiles" },
+  { key: "schedule",  label: "📅 Schedule",          desc: "Calendar view with AI goal planning" },
   { key: "chat",      label: "💬 AI Chat",           desc: "Chat with the AI reef advisor" },
 ];
 

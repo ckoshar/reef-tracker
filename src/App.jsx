@@ -21,6 +21,7 @@ import SettingsTab from "./components/SettingsTab";
 import InventoryTab from "./components/InventoryTab";
 import JournalTab from "./components/JournalTab";
 import LivestockTab from "./components/LivestockTab";
+import ScheduleTab from "./components/ScheduleTab";
 
 // ── Font Loading ──────────────────────────────────────────────────────────
 (() => {
@@ -191,6 +192,7 @@ ${ctx()}`,
     { id: "inventory", label: "📦 Inventory",    always: false },
     { id: "journal",   label: "📝 Journal",      always: false },
     { id: "livestock", label: "🐠 Livestock",    always: false },
+    { id: "schedule",  label: "📅 Schedule",     always: false },
     { id: "chat",      label: "💬 AI Chat",      always: false },
     { id: "setup",     label: "🪸 Setup",        always: true },
     { id: "settings",  label: "🛠️ Settings",     always: true },
@@ -242,6 +244,7 @@ ${ctx()}`,
         {tab === "inventory" && <InventoryTab rows={inventory} setRows={setInventory} />}
         {tab === "journal"   && <JournalTab rows={journal} setRows={setJournal} />}
         {tab === "livestock" && <LivestockTab rows={livestock} setRows={setLivestock} />}
+        {tab === "schedule"  && <ScheduleTab maint={maint} params={params} feed={feed} dose={dose} livestock={livestock} getCtx={ctx} aiMemory={aiMemory} setAiMemory={setAiMemory} />}
         {tab === "chat"      && <ChatTab chat={chat} input={chatIn} setInput={setChatIn} busy={chatBusy} onSend={sendChat} endRef={chatEnd} image={chatImage} setImage={setChatImage} />}
         {tab === "setup"     && <SetupTab tank={tank} setTank={setTank} onKeyChange={() => setHasKey(!!localStorage.getItem("reef_geminiKey"))} />}
         {tab === "settings"  && <SettingsTab settings={settings} setSettings={setSettings} aiMemory={aiMemory} setAiMemory={setAiMemory} />}

@@ -74,4 +74,5 @@ export const DEFAULT_SETTINGS = {
   inventory: true,
   journal: true,
   livestock: true,
+  schedule: true,
 };

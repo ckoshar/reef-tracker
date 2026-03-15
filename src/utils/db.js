@@ -54,7 +54,7 @@ const DB = {
     const keys = [
       "tank", "params", "feed", "maint", "dose", "light",
       "equip", "report", "inventory", "settings", "journal",
-      "livestock", "aiMemory",
+      "livestock", "aiMemory", "scheduleEvents", "scheduleGoals",
     ];
     for (const k of keys) {
       try {

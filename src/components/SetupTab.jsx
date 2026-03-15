@@ -5,6 +5,7 @@ export default function SetupTab({ tank, setTank, onKeyChange }) {
   const [f, setF]         = useState(tank);
   const [apiKey, setApiKey] = useState(localStorage.getItem("reef_geminiKey") || "");
   const [saved, setSaved] = useState(false);
+  const [showKey, setShowKey] = useState(false);
 
   // Load API key from cloud if available (overrides local)
   useEffect(() => {
@@ -54,7 +55,12 @@ export default function SetupTab({ tank, setTank, onKeyChange }) {
       </div>
       <div className="fg">
         <label className="fl">API Key</label>
-        <input type="password" className="fi" placeholder="AIza..." value={apiKey} onChange={e => setApiKey(e.target.value)} />
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type={showKey ? "text" : "password"} className="fi" style={{ flex: 1 }} placeholder="AIza..." value={apiKey} onChange={e => setApiKey(e.target.value)} />
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowKey(!showKey)} style={{ whiteSpace: "nowrap" }}>
+            {showKey ? "🙈 Hide" : "👁 Show"}
+          </button>
+        </div>
       </div>
     </div>
 
