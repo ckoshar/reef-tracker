@@ -22,6 +22,7 @@ import InventoryTab from "./components/InventoryTab";
 import JournalTab from "./components/JournalTab";
 import LivestockTab from "./components/LivestockTab";
 import ScheduleTab from "./components/ScheduleTab";
+import QuickInput from "./components/QuickInput";
 
 // ── Font Loading ──────────────────────────────────────────────────────────
 (() => {
@@ -249,6 +250,15 @@ ${ctx()}`,
         {tab === "setup"     && <SetupTab tank={tank} setTank={setTank} onKeyChange={() => setHasKey(!!localStorage.getItem("reef_geminiKey"))} />}
         {tab === "settings"  && <SettingsTab settings={settings} setSettings={setSettings} aiMemory={aiMemory} setAiMemory={setAiMemory} />}
       </div>
+
+      {/* Quick Input - always visible at bottom */}
+      <QuickInput
+        params={params} setParams={setParams}
+        feed={feed} setFeed={setFeed}
+        maint={maint} setMaint={setMaint}
+        dose={dose} setDose={setDose}
+        journal={journal} setJournal={setJournal}
+      />
     </div>
   );
 }
