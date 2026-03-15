@@ -36,6 +36,47 @@ function getMonthDays(year, month) {
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DOW = ["Su","Mo","Tu","We","Th","Fr","Sa"];
 
+// ── Robust JSON extraction ──────────────────────────────────────────────
+function extractJSON(text) {
+  // Try parsing the whole text first
+  try { return JSON.parse(text); } catch {}
+
+  // Remove code fences and try again
+  const cleaned = text.replace(/```json?\s*/gi, "").replace(/```/g, "").trim();
+  try { return JSON.parse(cleaned); } catch {}
+
+  // Find balanced JSON object using bracket counting
+  let start = cleaned.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(cleaned.slice(start, i + 1));
+        } catch {
+          // Try next { if this one failed
+          const nextStart = cleaned.indexOf("{", start + 1);
+          if (nextStart !== -1) { start = nextStart; i = start - 1; depth = 0; continue; }
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // ── Build unified event list from all tank data ─────────────────────────
 function buildEvents(maint, params, feed, dose, livestock, manualEvents, goals) {
   const events = [];
@@ -118,6 +159,7 @@ export default function ScheduleTab({ maint, params, feed, dose, livestock, getC
   const [showGoal, setShowGoal] = useState(false);
   const [goalInput, setGoalInput] = useState("");
   const [goalBusy, setGoalBusy] = useState(false);
+  const [goalError, setGoalError] = useState(null);
 
   // Load manual events & goals from DB on mount
   useState(() => {
@@ -169,10 +211,11 @@ export default function ScheduleTab({ maint, params, feed, dose, livestock, getC
     await saveManualEvents(manualEvents.filter(e => e.id !== id));
   };
 
-  // ── AI Goal Planning ──
+  // ── AI Goal Planning (with robust JSON parsing) ──
   const planGoal = async () => {
     if (!goalInput.trim() || goalBusy) return;
     setGoalBusy(true);
+    setGoalError(null);
     const prompt = `The user has this reef tank goal: "${goalInput}"
 
 Based on their current tank state, give:
@@ -180,7 +223,7 @@ Based on their current tank state, give:
 2. A brief explanation of why that timeline
 3. A step-by-step plan with specific milestone dates
 
-IMPORTANT: Return your response in this exact JSON format (no markdown, no code fences):
+IMPORTANT: Return your response as ONLY a JSON object with NO additional text before or after:
 {
   "title": "short goal title",
   "targetDate": "YYYY-MM-DD",
@@ -195,9 +238,16 @@ Today is ${tod()}.`;
     try {
       const text = await ai(
         [{ role: "user", content: prompt }],
-        `You are an expert reef aquarium planner. You have full context of the user's tank. Be realistic with timelines. Consider tank maturity, water parameters, existing livestock compatibility, and equipment. Return ONLY valid JSON.\n\n${getCtx()}`,
+        `You are an expert reef aquarium planner. You have full context of the user's tank. Be realistic with timelines. Consider tank maturity, water parameters, existing livestock compatibility, and equipment. Return ONLY valid JSON with no markdown formatting, no code fences, and no extra text.\n\n${getCtx()}`,
         1200
       );
+
+      // Check for API error messages
+      if (text.startsWith("⚠️") || text.startsWith("API Error") || text.startsWith("Connection error")) {
+        setGoalError(text);
+        setGoalBusy(false);
+        return;
+      }
 
       // Extract memories if any
       const memories = extractMemories(text);
@@ -208,20 +258,32 @@ Today is ${tod()}.`;
       }
 
       const cleaned = cleanResponse(text);
-      // Parse JSON from response
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const plan = JSON.parse(jsonMatch[0]);
-        const goal = { ...plan, id: Date.now().toString(), input: goalInput, createdDate: todayKey };
+      // Use robust JSON extraction
+      const plan = extractJSON(cleaned);
+
+      if (plan && plan.title && plan.milestones) {
+        // Ensure milestones have done property
+        const milestones = (plan.milestones || []).map(ms => ({
+          ...ms,
+          done: ms.done || false,
+        }));
+        const goal = {
+          ...plan,
+          milestones,
+          id: Date.now().toString(),
+          input: goalInput,
+          createdDate: todayKey,
+          priority: goals.length, // New goals go to end
+        };
         await saveGoals([...goals, goal]);
         setGoalInput("");
         setShowGoal(false);
       } else {
-        alert("AI returned an unexpected format. Try rephrasing your goal.");
+        setGoalError("AI returned an unexpected format. Try rephrasing your goal or being more specific.");
       }
     } catch (e) {
       console.error("Goal planning failed:", e);
-      alert("Failed to plan goal: " + (e.message || "API error"));
+      setGoalError("Failed to plan goal: " + (e.message || "Unknown error"));
     }
     setGoalBusy(false);
   };
@@ -238,6 +300,17 @@ Today is ${tod()}.`;
       return { ...g, milestones: ms };
     });
     await saveGoals(updated);
+  };
+
+  // ── Goal reordering ──
+  const moveGoal = async (index, direction) => {
+    const newIdx = index + direction;
+    if (newIdx < 0 || newIdx >= goals.length) return;
+    const updated = [...goals];
+    [updated[index], updated[newIdx]] = [updated[newIdx], updated[index]];
+    // Update priority fields
+    const withPriority = updated.map((g, i) => ({ ...g, priority: i }));
+    await saveGoals(withPriority);
   };
 
   // ── Navigation ──
@@ -261,6 +334,20 @@ Today is ${tod()}.`;
   // Events for selected day
   const selectedEvents = selectedDay ? (eventsByDate[selectedDay] || []) : [];
 
+  // ── Goal timeline helper ──
+  const getGoalProgress = (goal) => {
+    if (!goal.milestones?.length) return 0;
+    const done = goal.milestones.filter(ms => ms.done).length;
+    return Math.round((done / goal.milestones.length) * 100);
+  };
+
+  const getDaysRemaining = (targetDate) => {
+    if (!targetDate) return null;
+    const target = new Date(targetDate + "T12:00:00");
+    const now = new Date();
+    return Math.ceil((target - now) / 864e5);
+  };
+
   return <>
     <div className="sec-title">Schedule & Planner</div>
 
@@ -276,7 +363,7 @@ Today is ${tod()}.`;
       <button className="btn btn-ghost btn-sm" onClick={() => setShowAdd(!showAdd)}>
         + Add Event
       </button>
-      <button className="btn btn-ghost btn-sm" style={{ border: "1px solid rgba(6,182,212,.3)" }} onClick={() => setShowGoal(!showGoal)}>
+      <button className="btn btn-ghost btn-sm" style={{ border: "1px solid rgba(6,182,212,.3)" }} onClick={() => { setShowGoal(!showGoal); setGoalError(null); }}>
         🎯 Plan Goal with AI
       </button>
     </div>
@@ -321,6 +408,11 @@ Today is ${tod()}.`;
           <label className="fl">Your Goal</label>
           <textarea className="fi" placeholder="e.g. I want to add a Yellow Tang but my tank might be too small long-term. When should I upgrade and what do I need to prepare?" value={goalInput} onChange={e => setGoalInput(e.target.value)} rows={3} />
         </div>
+        {goalError && (
+          <div style={{ marginTop: 10, padding: "8px 12px", borderRadius: 6, background: "rgba(244,63,94,.08)", border: "1px solid rgba(244,63,94,.25)", fontSize: ".78rem", color: "#f43f5e" }}>
+            {goalError}
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button className="btn btn-cyan btn-sm" onClick={planGoal} disabled={goalBusy}>
             {goalBusy ? "Planning..." : "✨ Generate Plan"}
@@ -473,46 +565,151 @@ Today is ${tod()}.`;
       </div>
     )}
 
-    {/* ── GOALS SECTION ── */}
+    {/* ── GOALS SECTION with Priority Ordering ── */}
     {goals.length > 0 && (
       <>
-        <div className="sec-title" style={{ marginTop: 20 }}>Active Goals</div>
-        {goals.map(g => (
-          <div key={g.id} className="card" style={{ borderColor: "rgba(6,182,212,.2)", marginBottom: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: ".9rem" }}>🎯 {g.title}</div>
-                <div style={{ fontSize: ".75rem", opacity: .5, marginTop: 2 }}>
-                  Target: {new Date(g.targetDate + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
-                </div>
-              </div>
-              <button className="btn btn-ghost btn-sm" style={{ fontSize: ".65rem" }} onClick={() => deleteGoal(g.id)}>✕ Remove</button>
-            </div>
-            {g.explanation && (
-              <div style={{ fontSize: ".78rem", opacity: .7, marginTop: 8, lineHeight: 1.5, padding: "8px 10px", background: "rgba(6,182,212,.06)", borderRadius: 6 }}>
-                {g.explanation}
-              </div>
-            )}
-            {g.milestones?.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: ".75rem", fontWeight: 600, opacity: .6, marginBottom: 6 }}>Milestones</div>
-                {g.milestones.map((ms, idx) => (
-                  <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderBottom: "1px solid rgba(255,255,255,.04)", cursor: "pointer" }}
-                    onClick={() => toggleMilestone(g.id, idx)}
-                  >
-                    <span style={{ fontSize: ".85rem" }}>{ms.done ? "✅" : "⬜"}</span>
-                    <span style={{ fontSize: ".8rem", flex: 1, textDecoration: ms.done ? "line-through" : "none", opacity: ms.done ? .5 : 1 }}>
-                      {ms.title}
-                    </span>
-                    <span style={{ fontSize: ".65rem", opacity: .4 }}>
-                      {new Date(ms.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                    </span>
+        <div className="sec-title" style={{ marginTop: 20 }}>
+          Active Goals
+          <span style={{ fontSize: ".7rem", fontFamily: "Raleway, sans-serif", opacity: .5, marginLeft: 10, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+            Drag priorities with arrows
+          </span>
+        </div>
+        {goals.map((g, gIdx) => {
+          const progress = getGoalProgress(g);
+          const daysLeft = getDaysRemaining(g.targetDate);
+          const isOverdue = daysLeft !== null && daysLeft < 0;
+          const isClose = daysLeft !== null && daysLeft >= 0 && daysLeft <= 14;
+
+          return (
+            <div key={g.id} className="card" style={{ borderColor: "rgba(6,182,212,.2)", marginBottom: 12 }}>
+              {/* Header with priority controls */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flex: 1 }}>
+                  {/* Priority reorder buttons */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 28 }}>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      style={{ padding: "2px 6px", fontSize: ".7rem", opacity: gIdx === 0 ? .25 : 1 }}
+                      onClick={() => moveGoal(gIdx, -1)}
+                      disabled={gIdx === 0}
+                      title="Move up (higher priority)"
+                    >▲</button>
+                    <div style={{ textAlign: "center", fontSize: ".6rem", opacity: .4, fontWeight: 700 }}>#{gIdx + 1}</div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      style={{ padding: "2px 6px", fontSize: ".7rem", opacity: gIdx === goals.length - 1 ? .25 : 1 }}
+                      onClick={() => moveGoal(gIdx, 1)}
+                      disabled={gIdx === goals.length - 1}
+                      title="Move down (lower priority)"
+                    >▼</button>
                   </div>
-                ))}
+
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: ".9rem" }}>🎯 {g.title}</div>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: ".75rem", opacity: .5 }}>
+                        Target: {new Date(g.targetDate + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+                      </span>
+                      {daysLeft !== null && (
+                        <span style={{
+                          fontSize: ".68rem", fontWeight: 600, padding: "2px 8px", borderRadius: 10,
+                          background: isOverdue ? "rgba(244,63,94,.12)" : isClose ? "rgba(251,191,36,.12)" : "rgba(52,211,153,.12)",
+                          color: isOverdue ? "#f43f5e" : isClose ? "#fbbf24" : "#34d399",
+                          border: `1px solid ${isOverdue ? "rgba(244,63,94,.3)" : isClose ? "rgba(251,191,36,.3)" : "rgba(52,211,153,.3)"}`,
+                        }}>
+                          {isOverdue ? `${Math.abs(daysLeft)}d overdue` : `${daysLeft}d left`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <button className="btn btn-ghost btn-sm" style={{ fontSize: ".65rem" }} onClick={() => deleteGoal(g.id)}>✕ Remove</button>
               </div>
-            )}
-          </div>
-        ))}
+
+              {/* Progress bar */}
+              {g.milestones?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: ".68rem", opacity: .5, fontWeight: 600 }}>Progress</span>
+                    <span style={{ fontSize: ".68rem", fontWeight: 700, color: progress === 100 ? "#34d399" : "#06b6d4" }}>{progress}%</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 3, background: "rgba(6,182,212,.1)", overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 3, transition: "width .3s",
+                      width: `${progress}%`,
+                      background: progress === 100 ? "linear-gradient(90deg, #34d399, #06b6d4)" : "linear-gradient(90deg, #06b6d4, #38bdf8)",
+                    }} />
+                  </div>
+                </div>
+              )}
+
+              {g.explanation && (
+                <div style={{ fontSize: ".78rem", opacity: .7, marginTop: 10, lineHeight: 1.5, padding: "8px 10px", background: "rgba(6,182,212,.06)", borderRadius: 6 }}>
+                  {g.explanation}
+                </div>
+              )}
+
+              {/* Milestone timeline */}
+              {g.milestones?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: ".75rem", fontWeight: 600, opacity: .6, marginBottom: 8 }}>Milestone Timeline</div>
+                  <div style={{ position: "relative", paddingLeft: 20 }}>
+                    {/* Vertical timeline line */}
+                    <div style={{
+                      position: "absolute", left: 7, top: 4, bottom: 4, width: 2,
+                      background: "linear-gradient(to bottom, rgba(6,182,212,.3), rgba(6,182,212,.08))",
+                    }} />
+
+                    {g.milestones.map((ms, idx) => {
+                      const isPast = ms.date && ms.date < todayKey;
+                      const isNow = ms.date === todayKey;
+                      return (
+                        <div
+                          key={idx}
+                          style={{
+                            display: "flex", alignItems: "flex-start", gap: 10, padding: "6px 0",
+                            cursor: "pointer", position: "relative",
+                          }}
+                          onClick={() => toggleMilestone(g.id, idx)}
+                        >
+                          {/* Timeline dot */}
+                          <div style={{
+                            position: "absolute", left: -16, top: 9,
+                            width: 12, height: 12, borderRadius: "50%",
+                            border: `2px solid ${ms.done ? "#34d399" : isNow ? "#06b6d4" : isPast ? "#f97316" : "rgba(6,182,212,.3)"}`,
+                            background: ms.done ? "#34d399" : "var(--bg)",
+                            transition: "all .2s",
+                          }} />
+
+                          <div style={{ flex: 1, paddingLeft: 4 }}>
+                            <div style={{
+                              fontSize: ".8rem",
+                              textDecoration: ms.done ? "line-through" : "none",
+                              opacity: ms.done ? .5 : 1,
+                              color: isNow ? "#06b6d4" : "inherit",
+                            }}>
+                              {ms.done ? "✅" : "⬜"} {ms.title}
+                            </div>
+                            {ms.date && (
+                              <div style={{
+                                fontSize: ".65rem", marginTop: 2,
+                                color: isPast && !ms.done ? "#f97316" : "rgba(200,230,245,.4)",
+                              }}>
+                                {new Date(ms.date + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                {isPast && !ms.done && " — overdue"}
+                                {isNow && " — today"}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </>
     )}
   </>;
